@@ -1,0 +1,523 @@
+
+library(ricu)
+library(dplyr)
+library(data.table)
+library(stringr)
+ 
+src <- c("eicu","miiv")
+age <- load_concepts("age", src)
+age1=age %>% distinct(icustay_id, .keep_all = TRUE)
+
+agemimic3 <- load_concepts("age", "mimic")
+ageeicu <- load_concepts("age", "eicu")%>% 
+  rename(icustay_id=patientunitstayid )
+cf_id=ageeicu%>%
+  inner_join(agemimic3,by="icustay_id" )%>%
+  select(icustay_id)
+
+
+sofa<-fread("C:/Users/lxqji/OneDrive/R/0RICU/DataAnalysis/sofa.csv")%>%
+  distinct( icustay_id,.keep_all = TRUE  )  
+Uo24h<-fread("C:/Users/lxqji/OneDrive/R/0RICU/DataAnalysis/Uo24h.csv")
+sep3<-fread("C:/Users/lxqji/OneDrive/R/0RICU/DataAnalysis/sep3.csv")
+SHcom_fri<-fread("C:/Users/lxqji/OneDrive/R/0RICU/DataAnalysis/SHcom_fri.csv")%>%
+  select( -c(source,age)    )
+vital<-fread("C:/Users/lxqji/OneDrive/R/0RICU/DataAnalysis/vital.csv") 
+diagnos<-fread("C:/Users/lxqji/OneDrive/R/0RICU/DataAnalysis/diagnos.csv")%>%
+  distinct( icustay_id,.keep_all = TRUE  )  
+triglyceride<-fread("C:/Users/lxqji/OneDrive/R/0RICU/DataAnalysis/triglyceride.csv")%>%
+  distinct( icustay_id,.keep_all = TRUE  )  
+
+data <- load_concepts(
+  c("age", "sex", "height", "weight", "bmi"), src)
+
+data=data%>%
+  distinct( icustay_id, .keep_all = TRUE)%>%
+  left_join(ins24[,-1 ] ,by="icustay_id" ) %>%
+  left_join(sofa[,-3 ] ,by="icustay_id" )%>%  
+  left_join(Uo24h,by="icustay_id" )%>% 
+  left_join(sep3,by="icustay_id" )%>%
+  left_join(SHcom_fri,by="icustay_id" )%>%
+  left_join(vital,by="icustay_id" )%>%
+  left_join(diagnos,by="icustay_id" )%>%
+  left_join(triglyceride,by="icustay_id" ) 
+
+# Remove units attribute
+attributes(data$age)$units <- NULL
+attributes(data$height)$units <- NULL
+attributes(data$weight)$units <- NULL
+attributes(data$bmi)$units <- NULL
+
+# Convert to plain numeric
+data$age <- as.numeric(data$age)
+data$height <- as.numeric(data$height)
+data$weight <- as.numeric(data$weight)
+data$bmi <- as.numeric(data$bmi)
+
+df <- load_concepts(  c("death","los_hosp","los_icu"), src)
+df=df%>%
+  distinct( icustay_id, .keep_all = TRUE)%>%
+  select( -source,-index_var )
+data=data%>%
+  left_join(df,by="icustay_id" )
+
+
+data=data%>%
+  rename( glu_mean =glu_avg,resp_fri=resp,    
+          dbp_fir=dbp,hr_fir=hr,sbp_fir=sbp,  temp_fir=temp )
+
+data = subset(data, select=c( source,icustay_id,
+                              age, sex, height, weight,bmi,
+                              Hypertension,Diabete,CKD,MI,CHF,COPD,
+                              sofa,sep3,urine24h,
+                              triglyceride,
+                              rbc,wbc, plt,  hct,hgb, lymph ,neut, pt, ptt, 
+                              lact,pco2,ph,po2,fio2,
+                              alb,alt,ast,bicar,bili,bili_dir,bun,ca,
+                              crp, crea, k,mg,na,glu,glu_min,glu_max,glu_mean,
+                              o2sat, resp_fri,
+                              dbp_fir,hr_fir,sbp_fir,temp_fir,
+                              death,los_hosp, los_icu)) 
+  
+data=data%>%
+  mutate( Hypertension=ifelse( is.na(Hypertension), 0,Hypertension ) )%>%
+  mutate( Diabete=ifelse( is.na(Diabete), 0,Diabete ) )%>%
+  mutate( CKD=ifelse( is.na(CKD), 0,CKD ) )%>%
+  mutate( MI=ifelse( is.na(MI), 0,MI ) )%>%
+  mutate( CHF=ifelse( is.na(CHF), 0,CHF ) )%>%
+  mutate( COPD=ifelse( is.na(COPD), 0,COPD ) )%>%
+  mutate( death=ifelse( death==T, 1,0 ) ) %>%
+  mutate( urine24h=ifelse( is.na(urine24h), 0,urine24h ) )%>% 
+  mutate (sex=ifelse(sex=="Male" ,1,0 ) )%>%
+  mutate( sep3= ifelse( is.na(sep3), 0,sep3 )) 
+
+
+dat=fread("C:/Users/lxqji/OneDrive/R/0RICU/DataAnalysis/datacom202403x1.csv") #353169
+dat=dat[dat$age>17,]              
+dat=dat[complete.cases(dat$triglyceride),]  
+dat=dat[dat$los_icu>1,]  
+
+#mice 
+dat$death=ifelse( is.na(dat$death), 0,dat$death )
+dat=dat%>%
+  select(-bili_dir,-crp   )
+
+library(mice)
+dat1=dat[,1:5]
+aa <- mice(dat[,6:55], seed=123)
+dat2<-complete(aa, action=3)
+
+dat3=cbind(dat1,dat2)
+fwrite(dat3, "datacom202403micex0.csv")
+
+#ins24
+ins_breaks <- c(0, 1, 10, 20, 40, Inf)
+ins_cb <- function(ins, ...) {
+  day_one <- function(x) x >= hours(0L) &
+    x <= hours(24L)
+  idx_var <- index_var(ins)
+  ids_var <- id_vars(ins)
+  ins <- ins[
+    day_one(get(idx_var)), list(ins24 = sum(ins)),
+    by = c(ids_var)
+  ]
+  ins <- ins[,
+             ins24 := list(cut(ins24, breaks = ins_breaks,
+                               right = FALSE))
+  ]
+  ins
+}
+
+ins24 <- load_concepts("ins24", src) 
+fwrite(ins24, "ins24.csv")  
+
+
+#sofa
+dat <- load_concepts("sofa", "eicu")
+dat=dat[dat$labresultoffset  >0,]
+dat=dat %>% distinct(patientunitstayid, .keep_all = TRUE)
+names(dat)
+dat = subset(dat, select=c(patientunitstayid,sofa)) 
+names(dat)[1]="icustay_id"
+dat$source="eicu"
+fwrite(dat, "sofa_eicu2.csv")
+sofa_eicu=dat
+
+
+#sofa_miiv
+sofa_miiv <- load_concepts("sofa", "miiv")
+sofa_miiv=sofa_miiv[sofa_miiv$charttime  >0,]  #或选择如icu后24h  >24  
+sofa_miiv=sofa_miiv %>% distinct(stay_id, .keep_all = TRUE)
+colnames(sofa_miiv)=c("icustay_id","source","sofa")
+sofa_miiv = subset(sofa_miiv, select=c(icustay_id,sofa)) 
+sofa_miiv$source="miiv"
+
+#urine24h  
+dat <- load_concepts("urine", src)
+dat$charttime<-as.numeric(as.character(dat$charttime))
+dat=dat[dat$charttime>=0&dat$charttime<=24,]
+Uo24h= aggregate(dat$urine, by=list(type=dat$icustay_id),sum)
+colnames(Uo24h)=c("icustay_id","urine24h")
+fwrite(Uo24h, "Uo24h.csv")
+
+dat1 <- load_concepts("sep3",  "mimic")
+names(dat)
+dat1$source="mimic"
+
+#eicu_sepsis 
+pat=as.data.frame(eicu$patient )
+pat=subset(pat, select=c(patientunitstayid,apacheadmissiondx))
+dat2 <- pat %>% 
+  mutate(sep3 = str_detect(apacheadmissiondx, "Sepsis"))%>% 
+  select(-c(apacheadmissiondx))
+colnames(dat2)=c("icustay_id","sep3")
+dat2$sep3=ifelse( is.na(dat2$sep3), "FALSE",dat2$sep3)
+dat2$source="eicu"
+dat2$charttime=0
+dat2=dat2%>% 
+  select( icustay_id,charttime,sep3,source   )
+
+dat3 <- load_concepts("sep3",  "miiv")
+colnames(dat3)=c("icustay_id" ,"charttime" , "sep3")
+dat3$source="miiv"
+
+
+src <- c("eicu","miiv")
+age <- load_concepts("age", src)
+age_distinct <- age %>% distinct(icustay_id, .keep_all = TRUE)
+
+
+find_closest <- function(df, column_name) {
+  df %>%
+    filter(!is.na(df[[column_name]])) %>%
+    mutate(distance = abs(charttime - 0)) %>%
+    arrange(distance) %>%
+    slice(1) %>%
+    select(icustay_id, charttime, all_of(column_name))
+}
+
+process_columns <- function(columns) {
+  data <- load_concepts(columns, src)
+  dat <- age_distinct
+  for (col in columns) {
+    closest_values <- data %>%
+      group_by(icustay_id) %>%
+      do(find_closest(., col)) %>%
+      select(-charttime)
+    dat <- merge(dat, closest_values, by = 'icustay_id', all.x = TRUE)
+  }
+  return(dat)
+}
+
+xueqi <- process_columns(c('ph', 'pco2', 'po2', 'fio2', 'lact'))
+cbc <- process_columns(c("rbc", "wbc", "plt", "hct", "hgb"))
+cbc2 <- process_columns(c("lymph", "neut", "pt", "ptt", "alb"))
+SH1 <- process_columns(c("alt", "ast", "bicar", "bili", "bili_dir"))
+SH2 <- process_columns(c("bun", "ca", "crp", "crea", "k","mg", "na"))
+
+df1=subset(cbc,select = -c(source,age)    )
+df2=subset(cbc2,select = -c(source,age)    )
+df3=subset(SH1,select = -c(source,age)    )
+df4=subset(SH2,select = -c(source,age)    )
+
+df=merge(xueqi,df1,by = 'icustay_id')
+df=merge(df,df2,by = 'icustay_id')
+df=merge(df,df3,by = 'icustay_id')
+SHcom_fri=merge(df,df4,by = 'icustay_id')
+
+fwrite(SHcom_fri, "SHcom_fri.csv")
+
+sbp <- process_columns(c("sbp")) 
+Glu <- process_columns(c("glu"))
+o2sat <- process_columns(c("o2sat"))  #????
+dbp <- process_columns(c("dbp")) 
+resp <- process_columns(c("resp"))
+hr <- process_columns(c("hr")) 
+temp <- process_columns(c("temp"))
+
+vital=sbp%>%
+  select( - source,- age )%>%
+  left_join( dbp%>%select( - source,- age ),  by='icustay_id' )%>%
+  left_join( resp%>%select( - source,- age ),  by='icustay_id' )%>%
+  left_join( hr%>%select( - source,- age ),  by='icustay_id' )%>%
+  left_join( temp%>%select( - source,- age ),  by='icustay_id' )%>%
+  left_join( Glu%>%select( - source,- age ),  by='icustay_id' )%>%
+  left_join( o2sat%>%select( - source,- age ),  by='icustay_id' )
+
+fwrite(vital, "vital.csv")
+
+dat=as.data.frame(eicu$nursecharting )%>%
+  select( patientunitstayid,nursingchartoffset,nursingchartcelltypevalname,nursingchartvalue  )%>%
+  filter(str_detect(nursingchartcelltypevalname,"BP Systolic"))%>%#收缩压
+  select(-3)%>%
+  rename( icustay_id=patientunitstayid,charttime=nursingchartoffset,
+          value=nursingchartvalue  )%>%
+  mutate( value=as.numeric(as.character(value))) %>%
+  filter(value >= 40 & value <= 250)%>%    
+  filter(charttime >= 0 & charttime <= 24*60)%>% 
+  arrange(icustay_id,charttime)%>% 
+  select(-2)%>% 
+  distinct( icustay_id,.keep_all = T    )%>%
+  rename( sbp= value )                       
+fwrite(dat, "sbp_eicu.csv")
+#eicu  
+dat=as.data.frame(eicu$nursecharting )%>%
+  select( patientunitstayid,nursingchartoffset,nursingchartcelltypevalname,nursingchartvalue  )%>%
+  filter(str_detect(nursingchartcelltypevalname, "BP Diastolic"))%>%#舒张压
+  select(-3)%>%
+  rename( icustay_id=patientunitstayid,charttime=nursingchartoffset,
+          value=nursingchartvalue  )%>%
+  mutate( value=as.numeric(as.character(value))) %>%
+  filter(value >= 30 & value <= 200)%>%    
+  filter(charttime >= 0 & charttime <= 24*60)%>% 
+  arrange(icustay_id,charttime)%>% 
+  select(-2)%>% 
+  distinct( icustay_id,.keep_all = T    )%>%
+  rename( dbp= value )                       
+fwrite(dat, "dbp_eicu.csv")
+
+#eicu  Temp
+nurseCharting=as.data.frame(eicu$nursecharting )%>%
+  select( patientunitstayid,nursingchartoffset,nursingchartcelltypevalname,nursingchartvalue  )
+Temper <- nurseCharting[grep('Temperature \\(F\\)|Temperature \\(C\\)',
+                             nurseCharting$nursingchartcelltypevalname),]
+Temper=Temper%>%
+  filter(nursingchartoffset >= 0 & nursingchartoffset <= 24*60)
+setDT(Temper)
+Temper[,nursingchartvalue:=as.numeric(nursingchartvalue)]
+#transform between C and F
+Temper <- Temper[,nursingchartvalue :=
+                   ifelse(nursingchartcelltypevalname=="Temperature (F)",
+                          (nursingchartvalue-32)/1.8,
+                          nursingchartvalue)]
+Temper=Temper%>%
+  select(-3)%>%
+  rename( icustay_id=patientunitstayid,charttime=nursingchartoffset,
+          value=nursingchartvalue  )%>%
+  filter(value >= 30 & value <= 45)%>%    
+  arrange(icustay_id,charttime)%>% 
+  select(-2)%>% 
+  distinct( icustay_id,.keep_all = T    )%>%
+  rename( temp= value )                       
+
+fwrite(Temper, "temp_eicu.csv")
+
+vital<-fread("C:/Users/lxqji/OneDrive/R/0RICU/DataAnalysis/vital.csv")
+temp_eicu<-fread("C:/Users/lxqji/OneDrive/R/0RICU/DataAnalysis/temp_eicu.csv")
+dbp_eicu<-fread("C:/Users/lxqji/OneDrive/R/0RICU/DataAnalysis/dbp_eicu.csv")
+sbp_eicu<-fread("C:/Users/lxqji/OneDrive/R/0RICU/DataAnalysis/sbp_eicu.csv")
+vital=vital%>%
+  left_join( temp_eicu,by='icustay_id'   )%>%
+  left_join( dbp_eicu,by='icustay_id'   )%>%
+  left_join( sbp_eicu,by='icustay_id'   ) %>%
+  mutate( temp=ifelse( is.na( temp.x ), temp.y, temp.x )  )%>%
+  mutate( dbp=ifelse( is.na( dbp.x ), dbp.y, dbp.x )  )%>%
+  mutate( sbp=ifelse( is.na( sbp.x ), sbp.y, sbp.x )  )%>%
+  select( -c(temp.x,temp.y ,dbp.x,dbp.y, sbp.x,sbp.y ) )
+
+#
+glu<-fread("C:/Users/lxqji/OneDrive/R/0RICU/DataAnalysis/glu.csv")
+vital=vital%>%
+  left_join( glu,by='icustay_id'   )%>%
+  select( -glu_ini )
+
+fwrite(vital,"vital.csv"   )
+
+# 
+colname = c('ph','pco2',"po2","fio2", "lact")
+#colname = c('glu')
+library(dplyr)
+src <- c("mimic","eicu","miiv","aumc")
+data <- load_concepts(colname, src) %>% 
+  filter(charttime >= 0 & charttime <= 24) 
+
+min_values <- data %>% 
+  group_by(icustay_id) %>% 
+  summarize_all(funs(min(., na.rm = TRUE)))
+max_values <- data %>% 
+  group_by(icustay_id) %>% 
+  summarize_all(funs(max(., na.rm = TRUE)))
+names(min_values)[-1] <- paste0(names(min_values)[-1], "_min")
+names(max_values)[-1] <- paste0(names(max_values)[-1], "_max")
+
+final_data <- inner_join(min_values, max_values, by = "icustay_id")
+df=subset(final_data, select=-c(source_min, charttime_min,
+                                source_max,charttime_max))
+fwrite(df,"xueqiMaxMin.csv"  )
+
+colname = c('hr')
+
+
+df_eicu  <- load_concepts(colname, "eicu") %>%
+  rename( icustay_id= patientunitstayid,charttime=observationoffset)%>%
+  filter(charttime >= 0 & charttime <= 24)
+df_miiv  <- load_concepts(colname, "miiv") %>% 
+  filter(charttime >= 0 & charttime <= 24)%>%
+  rename( icustay_id= stay_id)
+
+
+data=rbind(df_eicu,df_miiv  )
+ini_values <- data %>% 
+  arrange(icustay_id, charttime) %>%  #  
+  distinct(icustay_id, .keep_all = TRUE) %>%  
+  select(-2)
+max_values <- data %>%
+  group_by(icustay_id) %>%
+  summarize_if(is.numeric, max, na.rm = TRUE)  
+min_values <- data %>%
+  group_by(icustay_id) %>%
+  summarize_if(is.numeric, min, na.rm = TRUE) 
+avg_values <- data %>%
+  group_by(icustay_id) %>%
+  summarize_if(is.numeric, mean, na.rm = TRUE) 
+names(min_values)[-1] <- paste0(names(min_values)[-1], "_min")
+names(max_values)[-1] <- paste0(names(max_values)[-1], "_max")
+names(avg_values)[-1] <- paste0(names(avg_values)[-1], "_avg")
+names(ini_values)[-1] <- paste0(names(ini_values)[-1], "_ini")
+dat <- left_join(ini_values, max_values, by = "icustay_id") %>%
+  left_join(min_values, by = "icustay_id") %>%
+  left_join(avg_values, by = "icustay_id")
+fwrite(dat,"hr.csv"  )
+
+#glu,glu_min,glu_max,glu_mean,
+colname = c('glu')
+
+df_mimic <- load_concepts(colname, "mimic") %>% 
+  filter(charttime >= 0 & charttime <= 24)
+df_eicu  <- load_concepts(colname, "eicu") %>%
+  rename( icustay_id= patientunitstayid,charttime=labresultoffset)%>%
+  filter(charttime >= 0 & charttime <= 24)
+df_miiv  <- load_concepts(colname, "miiv") %>% 
+  filter(charttime >= 0 & charttime <= 24)%>%
+  rename( icustay_id= stay_id)
+df_aumc  <- load_concepts(colname, "aumc") %>% 
+  filter(measuredat     >= 0 & measuredat     <= 24)%>%
+  rename( icustay_id= admissionid )
+
+data=rbind(df_mimic,  df_eicu,df_miiv ,df_aumc )
+ini_values <- data %>% 
+  arrange(icustay_id, charttime) %>%  #  
+  distinct(icustay_id, .keep_all = TRUE) %>%  
+  select(-2)
+max_values <- data %>%
+  group_by(icustay_id) %>%
+  summarize_if(is.numeric, max, na.rm = TRUE)  
+min_values <- data %>%
+  group_by(icustay_id) %>%
+  summarize_if(is.numeric, min, na.rm = TRUE) 
+avg_values <- data %>%
+  group_by(icustay_id) %>%
+  summarize_if(is.numeric, mean, na.rm = TRUE) 
+names(min_values)[-1] <- paste0(names(min_values)[-1], "_min")
+names(max_values)[-1] <- paste0(names(max_values)[-1], "_max")
+names(avg_values)[-1] <- paste0(names(avg_values)[-1], "_avg")
+names(ini_values)[-1] <- paste0(names(ini_values)[-1], "_ini")
+glu <- left_join(ini_values, max_values, by = "icustay_id") %>%
+  left_join(min_values, by = "icustay_id") %>%
+  left_join(avg_values, by = "icustay_id")
+fwrite(glu=,"glu.csv"  )
+
+
+#Triglyceride
+#eicu  Trig
+lab=as.data.frame(eicu$lab)
+lab=subset(lab, select=c(patientunitstayid,labname,labresultoffset,labresult))
+lab=lab[lab$labname=="triglycerides",]
+lab$labresultoffset=lab$labresultoffset/24  #h
+data=lab 
+
+processed_data <- data %>%
+  mutate(labresultoffset_abs = abs(labresultoffset)) %>%  
+  group_by(patientunitstayid) %>%  # 
+  arrange(labresultoffset_abs) %>%  # 
+  slice(1)   %>% 
+  select(c(patientunitstayid,labresult))#labresultoffset_abs
+colnames(processed_data)=c("icustay_id","triglyceride")
+trig_eicu=processed_data  
+
+
+
+dat <- load_concepts("age","eicu")
+names(dat)[1]="icustay_id"
+dat=merge(dat, trig_eicu,by = 'icustay_id',all.x = TRUE) 
+df1=subset( dat,select =- c(age) )
+fwrite(df1, "trig_eicu.csv")
+
+
+
+#miiv  labitems= 51000
+time=as.data.frame(miiv$icustays )
+time=time%>%
+  select(subject_id,hadm_id,stay_id,intime) %>%
+  arrange(subject_id,intime   )%>%                            
+  distinct(subject_id, .keep_all = TRUE)
+
+df=miiv$labevents[miiv$labevents$itemid==51000,]
+df3=df%>%
+  select( subject_id ,charttime,valuenum)%>%
+  left_join(time,by="subject_id" )%>%
+  mutate(time2=abs(charttime-intime)  )%>%
+  arrange(stay_id,time2   )%>%
+  distinct(stay_id, .keep_all = TRUE)%>%
+  select(stay_id,valuenum   )%>%
+  rename(icustay_id=stay_id,triglyceride= valuenum  )
+fwrite( df,"triglyceride_miiv.csv" )
+
+fwrite(trig,"triglyceride.csv" )
+
+
+
+
+#miiV
+time=as.data.frame(miiv$icustays )
+time=time%>%
+  select(subject_id,hadm_id,stay_id,intime) %>%
+  arrange(subject_id,intime   )%>%                            
+  distinct(subject_id, .keep_all = TRUE)
+ 
+df= as.data.frame(eicu$patient )
+df1=df%>%
+  select(uniquepid,patientunitstayid)%>%
+  arrange(uniquepid, patientunitstayid )%>%
+  distinct(uniquepid ,.keep_all = TRUE  )
+
+ 
+MV=as.data.frame(eicu$apachepatientresult)%>% 
+  select( apachepatientresultsid,patientunitstayid, 
+          ,actualventdays,unabridgedactualventdays )
+
+
+ 
+miiv_death=as.data.frame(miiv$admissions)%>%
+  select(subject_id,hadm_id,hospital_expire_flag)%>%
+  mutate(death=ifelse(hospital_expire_flag==1,1,0))%>%
+  select(-hospital_expire_flag)
+time=as.data.frame(miiv$icustays )%>%
+  select(subject_id,hadm_id,stay_id,intime) %>%
+  arrange(subject_id,intime   )%>%                            
+  distinct(subject_id, .keep_all = TRUE)%>%
+  select(hadm_id,stay_id)
+ 
+miiv_death=merge(time,miiv_death,by="hadm_id")%>%
+  select(stay_id,death) 
+table(miiv_death$death)   
+ 
+RICU_miiv_death <- load_concepts("death", "miiv")%>%
+  mutate(death2=1 )%>%
+  select(stay_id,death2) 
+ 
+datcom=merge(miiv_death,RICU_miiv_death,by="stay_id")
+
+
+ merged_data <- merge(numericitems, admissions, by="admissionid", all.x=TRUE)
+ 
+selected_data <- merged_data[merged_data$itemid %in% c(8658, 8659, 8662, 13058, 13059, 13060, 13061, 13062, 13063, 13952, 16110), ]
+ 
+selected_data$time <- as.numeric(selected_data$measuredat - selected_data$admittedat) / (1000*60)
+selected_data <- selected_data[selected_data$time <= 60*60*24, ]
+ 
+selected_data$validated <- !is.na(selected_data$registeredby)
+ 
+temperature_data <- selected_data[, c("admissionid", "itemid", "item", "value", "validated", "time")]
+ 
+
