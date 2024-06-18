@@ -1,0 +1,546 @@
+library(ricu)
+library(dplyr)
+library(data.table)
+library(stringr)
+library(gtsummary)
+library(survival)
+library(survminer)
+
+dat= read.csv(
+  "C:/Users/lxqji/OneDrive/R/0TyG/TyGicu2024/DataAnalysis/2024dry_TyGdat.csv")
+dat = dat %>%
+  rename(MI = myocardial.infarction, CHF = congestive.heart.failure,
+         COPD = Chronic.obstructive.pulmonary.disease,
+         icustay_id = Number, triglyceride = Triglyceride, urine24h = urine24) %>%
+  mutate(icustay_id = icustay_id + 9900000000, bmi =  weight/(height/100)^2, ins24 = NA, CAD = NA,
+         Cirrhosis = NA, source = "drydata")
+
+dat$crea = dat$crea / 88.4 # µmol/L to mg/dL
+dat$glu = dat$glu * 18 # mmol/L to mg/dL
+dat$hct = dat$hct *100  
+dat$hgb = dat$hgb /10  
+dat$ca = dat$ca * 4  # Convert from mmoL/L to mg/dL
+
+dat=dat%>%
+  select( source,icustay_id,
+          age, sex, height, weight,bmi,
+          Hypertension,Diabete,CKD,MI,CHF,COPD,
+          sofa,sep3,urine24h,
+          triglyceride,
+          rbc,wbc, plt,  hct,hgb, lymph ,neut, pt, ptt, 
+          lact,pco2,ph,po2,fio2,
+          alb,alt,ast,bicar,bili,bili_dir,bun,ca,
+          crp, crea, k,mg,na,glu,glu_min,glu_max,glu_mean,
+          o2sat, resp_fri,
+          dbp_fir,hr_fir,sbp_fir,temp_fir,
+          death,los_hosp, los_icu)
+
+#drydata
+dat= read.csv(
+  "C:/Users/lxqji/OneDrive/R/0TyG/TyGicu2024/DataAnalysis/2024dry_TyGdatx1.csv")
+dat$glu_min = dat$glu_min * 18
+dat$glu_max = dat$glu_max * 18
+dat$glu_mean = dat$glu_mean * 18  # mmol/L to mg/dL
+dat$triglyceride = dat$triglyceride * 88.6 # mmol/L to mg/dL
+dat$mg = dat$mg * 2.42    # mmol/L to mg/dL
+dat$alb = dat$alb/10  #g/L to g/dL  
+
+dat = subset(dat, select=c( source,icustay_id,
+                            age, sex, bmi,
+                            Hypertension,Diabete,CKD,MI,CHF,COPD,
+                            sofa,sep3,urine24h,
+                            triglyceride,
+                            rbc,wbc, plt,  hct,hgb, lymph ,neut, pt, ptt, 
+                            lact,pco2,ph,po2,fio2,
+                            alb,alt,ast,bicar,bili,bun,ca,
+                            crea, k,mg,na,glu,glu_min,glu_max,glu_mean,
+                            o2sat, resp_fri,
+                            dbp_fir,hr_fir,sbp_fir,temp_fir,
+                            death,los_hosp, los_icu)) 
+
+data=dat%>%
+  select(-icustay_id,-age )  
+library(tidyverse)
+is_continuous <- function(column) {
+  is.numeric(column) && length(unique(column)) > 2
+}
+continuous_vars <- sapply(data, is_continuous)
+categorical_vars <- !continuous_vars
+cat("分类变量：", paste(names(data)[categorical_vars], collapse = ", "), "\n")
+
+find_outliers <- function(x) {
+  Q1 <- quantile(x, 0.25, na.rm = TRUE)
+  Q3 <- quantile(x, 0.75, na.rm = TRUE)
+  IQR <- Q3 - Q1
+  lower_bound <- Q1 - 1.5 * IQR
+  upper_bound <- Q3 + 1.5 * IQR
+  return(list(lower = x < lower_bound, upper = x > upper_bound, lower_bound = lower_bound, upper_bound = upper_bound))
+}
+
+data_clean <- data
+for (var in names(data)[continuous_vars]) {
+  outliers_info <- find_outliers(data[[var]])
+
+  data_clean[[var]][outliers_info$lower] <- outliers_info$lower_bound
+
+  data_clean[[var]][outliers_info$upper] <- outliers_info$upper_bound
+}
+
+summary(data_clean )  
+data2=dat%>%
+  select(icustay_id,age )    
+data=cbind(data2,data_clean)
+
+data = subset(data, select=c( source,icustay_id,
+                              age, sex, bmi,
+                              Hypertension,Diabete,CKD,MI,CHF,COPD,
+                              sofa,sep3,urine24h,
+                              triglyceride,
+                              rbc,wbc, plt,  hct,hgb, lymph ,neut, pt, ptt, 
+                              lact,pco2,ph,po2,fio2,
+                              alb,alt,ast,bicar,bili,bun,ca,
+                              crea, k,mg,na,glu,glu_min,glu_max,glu_mean,
+                              o2sat, resp_fri,
+                              dbp_fir,hr_fir,sbp_fir,temp_fir,
+                              death,los_hosp, los_icu)) 
+
+dat=dat%>%
+  mutate(TyG = log((triglyceride* glu) / 2))%>%
+  mutate(TyG_Q = ntile(TyG, 4))%>%
+  mutate(TyG_Q = factor(TyG_Q))
+
+data=dat
+
+dat=dat[dat$source=="eicu",]
+df= as.data.frame(eicu$patient )
+df1=df%>%
+  select(uniquepid,patientunitstayid)%>%
+  arrange(uniquepid, patientunitstayid )%>%
+  distinct(uniquepid ,.keep_all = TRUE  )%>%
+  select(patientunitstayid)%>%
+  rename(icustay_id=patientunitstayid)
+
+dat=merge(dat,df1,by="icustay_id")
+
+MV=as.data.frame(eicu$apachepatientresult)%>% 
+  select( patientunitstayid,actualventdays )%>%
+  rename( icustay_id=patientunitstayid,vent_ind=actualventdays )%>%
+  distinct(icustay_id,.keep_all = TRUE  )
+
+dat=merge(dat,MV,by="icustay_id",all.x=TRUE)%>%
+  mutate(vent_ind=ifelse( is.na(vent_ind  ) ,0,vent_ind))
+
+ins24<-fread("C:/Users/lxqji/OneDrive/R/0RICU/DataAnalysis/ins24.csv")%>%
+  select(icustay_id,ins24)
+
+dat=merge(dat,ins24,by="icustay_id",all.x=TRUE)%>%
+  mutate(ins24=ifelse( is.na(ins24  ) ,0,ins24))
+fwrite(dat,"2024TyG_eicu.csv"  )
+
+
+dat1= read.csv("2024TyG_eicu.csv")%>%
+  select(source,age, sex, sofa,sep3,urine24h,
+         Hypertension,Diabete, CHF,MI,CKD,COPD, 
+         wbc,rbc,plt,ph,lact,bili,crea,bun,
+         hr_fir,resp_fri,sbp_fir,dbp_fir,temp_fir,
+         death,los_icu,los_hosp)
+dat2= read.csv("2024TyG_miiv.csv")%>%
+  select(source,age, sex, sofa,sep3,urine24h,
+         Hypertension,Diabete, CHF,MI,CKD,COPD, 
+         wbc,rbc,plt,ph,lact,bili,crea,bun,
+         hr_fir,resp_fri,sbp_fir,dbp_fir,temp_fir,
+         death,los_icu,los_hosp)
+dat3= read.csv("2024TyG_drydata.csv")%>%
+  select(source,age, sex, sofa,sep3,urine24h,
+         Hypertension,Diabete, CHF,MI,CKD,COPD, 
+         wbc,rbc,plt,ph,lact,bili,crea,bun,
+         hr_fir,resp_fri,sbp_fir,dbp_fir,temp_fir,
+         death,los_icu,los_hosp)
+dat=rbind(dat1,dat2,dat3      )
+library(CBCgrps)
+library(ggplot2)
+library(DataExplorer)
+skewvar2 = c("bun","los_icu","los_hosp","resp_fri","lact",
+             "bili","crea","urine24h","sofa")               
+tab1<-multigrps(dat,gvar = "source",norm.rd = 1,cat.rd = 1, sk.rd=1,minfactorlevels = 5,
+                skewvar = skewvar2)
+colnames(tab1) <- c("Col1", "Col2", "Col3", "Col4", "Col5","Col6")
+flextable::save_as_docx(flextable::flextable(as.data.frame(tab1)),
+                        path = "tab_3data.docx")
+
+
+#table1  
+dat= read.csv("2024TyG_eicu.csv")
+summary(dat$TyG)
+quantile(dat$TyG, 0.5)
+
+
+dat$ins24=ifelse(dat$ins24=="[10,20)"|dat$ins24=="[20,40)","a10",
+                 ifelse(dat$ins24=="[40,Inf)","a40","a0"))
+
+dat <- dat %>%
+  select(TyG_Q,age, sex,bmi, sofa,sep3,urine24h,ins24,         #ins24  vent_ind
+         Hypertension,Diabete , CHF,MI,CKD,COPD, 
+         wbc,rbc,plt,ph,lact,bili,crea,bun,
+         hr_fir,resp_fri,sbp_fir,dbp_fir,temp_fir,
+         death,los_icu,los_hosp,vent_ind)
+library(CBCgrps)
+library(ggplot2)
+library(DataExplorer)
+
+skewvar2 = c("bun","los_icu","los_hosp","resp_fri","lact",
+             "bili","crea","urine24h","sofa","vent_ind")                  #vent_ind
+tab1<-multigrps(dat,gvar = "TyG_Q",norm.rd = 1,cat.rd = 1, sk.rd=1,minfactorlevels = 5,
+                skewvar = skewvar2)
+
+colnames(tab1) <- c("Col1", "Col2", "Col3", "Col4", "Col5","Col6", "Col7")
+flextable::save_as_docx(flextable::flextable(as.data.frame(tab1)),
+                        path = "eicu_tab1.docx")
+
+#table2  
+skewvar2 = c("bun","los_icu","los_hosp","resp_fri","lact","sofa",
+             "bili","crea","urine24h")  #
+tab1<-twogrps(dat,gvar = "death",norm.rd = 1,cat.rd = 1, sk.rd=1,minfactorlevels = 5,
+              skewvar = skewvar2)
+colnames(tab1$Table) <- c("Col1", "Col2", "Col3", "Col4", "Col5")
+flextable::save_as_docx(flextable::flextable(as.data.frame(tab1$Table)),
+                        path = "eicu_tab2.docx")
+##table3  
+##lasso
+dat= read.csv("2024TyG_eicu.csv")
+dat$ins24=ifelse(dat$ins24=="[10,20)"|dat$ins24=="[20,40)","a10",
+                 ifelse(dat$ins24=="[40,Inf)","a40","a0"))
+data=dat
+dat <- data %>%
+  select(-c(source,icustay_id,los_hosp,los_icu,vent_ind,TyG_Q,triglyceride))
+
+library(glmnet)
+library(ggplot2)
+X <- as.matrix(dat[, -which(names(dat) == "death")])  
+y <- as.vector(dat$death) 
+
+cv_lasso <- cv.glmnet(X, y, alpha = 1)
+best_lambda <- cv_lasso$lambda.min*30
+
+final_lasso_model <- glmnet(X, y, alpha = 1, lambda = best_lambda)
+coefficients <- coef(final_lasso_model)
+
+lasso_path <- glmnet(X, y, alpha = 1)
+
+plot(lasso_path, xvar = "lambda", label = TRUE, main = "Lasso Path")
+abline(v = log(best_lambda), lty = 2, col = "red")
+legend("topright", legend = c("Best Lambda"), col = "red", lty = 2)
+cv_errors <- data.frame(
+  lambda = log(cv_lasso$lambda),
+  mse = cv_lasso$cvm,
+  lower_ci = cv_lasso$cvlo,
+  upper_ci = cv_lasso$cvup
+)
+
+g <- ggplot(cv_errors, aes(x = lambda, y = mse)) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = lower_ci, ymax = upper_ci), width = 0.1) +
+  geom_vline(xintercept = log(best_lambda), linetype = "dashed", color = "red") +
+  theme_minimal() +
+  labs(x = "log(Lambda)", y = "Cross-Validation Error", title = "Cross-Validation Error vs. Lambda") +
+  annotate("text", x = log(best_lambda) + 0.5, y = max(cv_errors$mse), label = "Best Lambda", color = "red")
+print(g)
+non_zero_indices <- which(coefficients != 0)
+
+selected_variables <- rownames(coefficients)[non_zero_indices]
+
+print(selected_variables)    
+
+#mod1
+
+library(car)
+library(gtsummary)
+library(flextable)
+
+fit<-lm(dat$death ~ dat$age+ dat$neut+ dat$sofa+ dat$glu_max+ dat$pt+ dat$lact+ 
+          dat$ast+ dat$bun+ dat$resp_fri
+        ,data=dat)
+vif(fit)
+library(survival)
+data$TyG_Q=as.factor(data$TyG_Q)
+
+mod1 <- coxph(Surv(los_hosp, death) ~ age+TyG_Q , data)
+
+mod2 <- coxph(Surv(los_hosp, death) ~ age+sex+bmi+TyG_Q , data)
+
+mod3 <- coxph(Surv(los_hosp, death) ~ age+sex+bmi+lact+sofa+pt+ast+resp_fri+neut+bun
+              +TyG_Q , data)
+
+tbl_regression(mod3, exponentiate = TRUE)
+
+table1=tbl_regression(mod3, exponentiate = TRUE)
+save_as_docx(as_flex_table(table1), path = "eicu_cox3x.docx")
+
+##KM  
+dat= read.csv("2024TyG_eicu.csv")
+library("survminer")
+fit <- survfit(Surv(los_hosp, death) ~ TyG_Q, data = dat)
+ggsurvplot(fit,
+           #conf.int = TRUE,# 
+           xlab='days', 
+           pval = T,
+           pval.size=3,
+           pval.coord = c(0, 0.6),
+           #linetype = "group", # 
+           legend.labs=c('TyG_Q1','TyG_Q2','TyG_Q3','TyG_Q4'),
+           surv.median.line = "hv", #
+           ggtheme = theme_bw(), # 
+           palette = c("#FFA500","#800080", "#0000FF","#808080"),
+           risk.table = TRUE,  
+           risk.table.col = "strata",
+           ylim = c(0.5, 1))
+
+
+library(rms)
+library(ggrcs)
+library(ggplot2)
+library(scales)
+library(cowplot)
+library(survival)
+library(survminer)
+
+dat= read.csv("2024TyG_eicu.csv")
+data=dat
+hist(data$TyG)
+q5<-quantile(data$TyG, 0.01)
+data[data$ TyG <q5,]$ TyG <-q5
+
+dd <- datadist(data)
+options(datadist = 'dd')
+mod3 <- cph(Surv(los_hosp, death) ~ rcs(TyG, 4) +age+sex+bmi+lact+sofa+
+              pt+ast+bun+resp_fri+neut, data = data, x = TRUE, y = TRUE)         #glu_max+
+
+#Relationship Between TyG Index and Hospital Mortality Risk
+p <-ggrcs(data, mod3, x = "TyG", histcol = "deepskyblue", histbinwidth = 0.25,
+          ribcol = "coral", ribalpha = 0.5, xlab = "TyG Index", 
+          ylab = "HR(95%CI)")
+
+library(rms)
+library(ggplot2)
+library(scales)
+library(cowplot)
+
+p <-ggrcs(data, mod3, x = "TyG", histcol = "deepskyblue", histbinwidth = 0.25,
+          ribcol = "coral", ribalpha = 0.3, xlab = "Triglyceride-Glucose Index",
+          title = "A  Hospital Mortality ",
+          ylab = "HR(95%CI)",lift = F,px=8,py= 1.5) 
+p + ylim(0, 2)
+
+
+p <- ggrcs(data, mod3, x = "TyG")
+p + geom_vline(aes(xintercept = 9), colour = "#BB0000", linetype = "dashed")
+
+tab<-cut.tab(fit1,"age",dt)
+write.csv(tab,file= "1.csv",row.names = F)
+
+
+dat= read.csv("2024TyG_eicu.csv")
+dat=dat%>%
+  mutate(TyG = log((triglyceride* glu) / 2))%>%
+  mutate(TyG_Q = ntile(TyG, 4))%>%
+  mutate(TyG_Q = factor(TyG_Q))
+data=dat
+
+data=data%>%
+  mutate(newTyG=ifelse( TyG>9,1,0  )  )
+#newTyG==1
+dat1=data[data$newTyG==1,]
+dd <- datadist(dat1)
+options(datadist = 'dd')
+mod3 <- cph(Surv(los_hosp, death) ~ rcs(glu_mean, 4) +age+lact+sex+bmi+sofa+  
+              pt+ast+resp_fri, data = dat1, x = TRUE, y = TRUE)   #
+
+ggrcs(data, mod3, x = "glu_mean", histcol = "deepskyblue", histbinwidth = 2,
+      ribcol = "coral", ribalpha = 0.5, xlab = "Average glucose on the first day of ICU admission", 
+      ylab = "HR(95%CI)")# 7-9
+
+p <-ggrcs(data, mod3, x = "glu_mean", histcol = "deepskyblue", 
+          histbinwidth = 3,
+          ribcol = "coral", ribalpha = 0.5, xlab = "Average glucose",
+          title = "A Hospital Mortality ",
+          ylab = "HR(95%CI)",lift = F,px=50,py= 1.5) 
+p + ylim(0, 2)
+
+
+dat0=data[data$newTyG==0,]
+dd <- datadist(dat0)
+options(datadist = 'dd')
+mod3 <- cph(Surv(los_hosp, death) ~ rcs(glu_mean, 4) +age+sex+bmi+lact+sofa+
+              pt+ast+resp_fri, data = dat0, x = TRUE, y = TRUE)
+
+ggrcs(data, mod3, x = "glu_mean", histcol = "deepskyblue", histbinwidth = 3,
+      ribcol = "coral", ribalpha = 0.5, xlab = "Average glucose", 
+      title = "B Hospital Mortality ",
+      ylab = "HR(95%CI)")
+p + ylim(0, 6)
+
+
+
+dat <- dat %>%
+  select(group,TyG,age, sex,bmi, sofa,sep3,urine24h,ins24,
+         Hypertension,Diabete , CHF,MI,CKD,COPD, 
+         wbc,rbc,plt,ph,lact,bili,crea,bun,
+         hr_fir,resp_fri,sbp_fir,dbp_fir,temp_fir,glu_min,
+         death,los_icu,los_hosp)%>%
+  mutate( glu_min2=ifelse(glu_min<=70,1,0)  ) 
+
+skewvar2 = c("bun","los_icu","los_hosp","resp_fri","lact",
+             "bili","crea","urine24h","sofa") #
+tab1<-multigrps(dat,gvar = "group",norm.rd = 1,cat.rd = 1, sk.rd=1,minfactorlevels = 5,
+                skewvar = skewvar2)
+
+colnames(tab1) <- c("Col1", "Col2", "Col3", "Col4", "Col5")
+flextable::save_as_docx(flextable::flextable(as.data.frame(tab1)),
+                        path = "drydata_TyG_tab1.docx")
+dat= read.csv("2024TyG_drydata.csv")
+#lasso
+
+data <- dat %>%
+  select(c(los_hosp, death,TyG,
+           age,sex,bmi,lact,sofa,COPD,
+           pt,bun,crea,glu_max ))
+dd <- datadist(data)
+options(datadist = 'dd')
+mod3 <- cph(Surv(los_hosp, death) ~ rcs(TyG, 4) +age+sex+bmi+lact+sofa+COPD+
+              pt+bun+crea+glu_max, data = data, x = TRUE, y = TRUE)
+p=ggrcs(data, mod3, x = "TyG", histcol = "deepskyblue", 
+        histbinwidth = 0.25,
+        ribcol = "coral", ribalpha = 0.5, xlab = "Triglyceride-Glucose Index",
+        title = "B  Hospital Mortality ",
+        ylab = "HR(95%CI)",lift = F,px=8,py= 1.5)
+p22=p + ylim(0, 2)
+
+data=dat%>%
+  select(-ins24  )%>%
+  filter  (group==1 )
+dd <- datadist(data)
+options(datadist = 'dd')
+
+mod3 <- cph(Surv(los_hosp, death) ~ rcs(glu_mean, 4) +age+sex+bmi+lact+sofa+COPD+
+              pt+bun+crea, data = data, x = TRUE, y = TRUE)
+
+p <-ggrcs(data, mod3, x = "glu_mean", histcol = "deepskyblue", 
+          histbinwidth = 6,
+          ribcol = "coral", ribalpha = 0.5, xlab = "Average glucose",
+          title = "C Hospital Mortality ",
+          ylab = "HR(95%CI)",lift = F,px=80,py= 2) 
+p3=p + ylim(0, 2)
+
+data=dat%>%
+  select(-ins24  )%>%
+  filter  (group==0 )
+dd <- datadist(data)
+options(datadist = 'dd')
+mod3 <- cph(Surv(los_hosp, death) ~ rcs(glu_mean, 4) +age+sex+bmi+lact+sofa+COPD+
+              crea, data = data, x = TRUE, y = TRUE)
+
+p4=ggrcs(data, mod3, x = "glu_mean", histcol = "deepskyblue",
+         histbinwidth = 15,
+         ribcol = "coral", ribalpha = 0.5, xlab = "Average glucose", 
+         title = "D Hospital Mortality ",lift = F,px=150,py= 5,
+         ylab = "HR(95%CI)")
+
+#miiV
+dat= read.csv(
+  "2024TyGdatx3.csv")
+dat=dat[dat$source=="miiv",]
+
+time=as.data.frame(miiv$icustays )
+time=time%>%
+  select(subject_id,hadm_id,stay_id,intime) %>%
+  arrange(subject_id,intime   )%>%                            
+  distinct(subject_id, .keep_all = TRUE) %>%
+  select(stay_id)%>%
+  rename(icustay_id=stay_id)
+dat=merge(dat,time,by="icustay_id",all.x = TRUE)
+
+
+dat=dat%>%
+  mutate(TyG = log((triglyceride* glu) / 2))%>%
+  mutate(group = ifelse(TyG>9, 1, 0))
+
+ins24<-fread("C:/Users/lxqji/OneDrive/R/0RICU/DataAnalysis/ins24.csv")%>%
+  select(icustay_id,ins24)
+dat=merge(dat,ins24,by="icustay_id",all.x = TRUE)
+
+dat$ins24=ifelse(dat$ins24=="[10,20)"|dat$ins24=="[20,40)","a10",
+                 ifelse(dat$ins24=="[40,Inf)","a40","a0"))
+dat$ins24=ifelse(is.na(dat$ins24),"a0",dat$ins24)
+
+fwrite(dat,"2024TyG_miiv.csv")
+dat= read.csv("2024TyG_miiv.csv")
+
+dat <- dat %>%
+  select(group,TyG,age, sex,bmi, sofa,sep3,urine24h,ins24,
+         Hypertension,Diabete , CHF,MI,CKD,COPD, 
+         wbc,rbc,plt,ph,lact,bili,crea,bun,
+         hr_fir,resp_fri,sbp_fir,dbp_fir,temp_fir,glu_min,
+         death,los_icu,los_hosp)%>%
+  mutate( glu_min2=ifelse(glu_min<=70,1,0)  )
+skewvar2 = c("bun","los_icu","los_hosp","resp_fri","lact",
+             "bili","crea","urine24h","sofa") #
+tab1<-multigrps(dat,gvar = "group",norm.rd = 1,cat.rd = 1, sk.rd=1,minfactorlevels = 5,
+                skewvar = skewvar2)
+colnames(tab1) <- c("Col1", "Col2", "Col3", "Col4", "Col5")
+flextable::save_as_docx(flextable::flextable(as.data.frame(tab1)),
+                        path = "miiv_TyG_tab1.docx")
+
+#lasso
+dat <- dat %>%
+  select(-c(icustay_id,los_hosp,los_icu,triglyceride,ins24,group  ))
+
+dat= read.csv("2024TyG_miiv.csv")
+data=dat%>%
+  select(-ins24  )
+q5<-quantile(data$TyG, 0.01)
+data[data$ TyG <q5,]$ TyG <-q5
+dd <- datadist(data)
+options(datadist = 'dd')
+
+mod3 <- cph(Surv(los_hosp, death) ~ rcs(TyG, 4) +age+sex+bmi+alb+sofa+urine24h+ptt+
+              bun+ast, data = data, x = TRUE, y = TRUE)
+p <-ggrcs(data, mod3, x = "TyG", histcol = "deepskyblue",
+          histbinwidth = 0.25,
+          ribcol = "coral", ribalpha = 0.3, xlab = "Triglyceride-Glucose Index",
+          title = "C  Hospital Mortality ",
+          ylab = "HR(95%CI)",lift = F,px=8,py= 1.5) 
+p33=p + ylim(0, 2)
+
+data=dat%>%
+  select(-ins24  )%>%
+  filter  (group==1 )
+dd <- datadist(data)
+options(datadist = 'dd')
+mod3 <- cph(Surv(los_hosp, death) ~ rcs(glu_mean, 4) +age+sex+bmi+alb+sofa+ptt+bun+ast+lact
+            , data = data, x = TRUE, y = TRUE)
+p <-ggrcs(data, mod3, x = "glu_mean", histcol = "deepskyblue", 
+          histbinwidth = 8,
+          ribcol = "coral", ribalpha = 0.5, xlab = "Average glucose",
+          title = "E Hospital Mortality ",
+          ylab = "HR(95%CI)",lift = F,px=150,py= 1.5) 
+p5=p + ylim(0, 2)
+
+data=dat%>%
+  select(-ins24  )%>%
+  filter  (group==0 )
+dd <- datadist(data)
+options(datadist = 'dd')
+mod3 <- cph(Surv(los_hosp, death) ~ rcs(glu_mean, 4) +age+sex+bmi+alb+sofa+ptt+bun+ast+lact
+            , data = data, x = TRUE, y = TRUE)
+p6=ggrcs(data, mod3, x = "glu_mean", histcol = "deepskyblue",
+         histbinwidth = 15,
+         ribcol = "coral", ribalpha = 0.5, xlab = "Average glucose", 
+         title = "F Hospital Mortality ",lift = F,px=150,py= 4,
+         ylab = "HR(95%CI)")
+
+library(gridExtra)
+grid.arrange(p5, p6, ncol=2)
+
+grid.arrange(p11, p22,p33, nrow=3)
+
